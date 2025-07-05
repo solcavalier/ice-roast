@@ -1,0 +1,77 @@
+name: Generate Go Protobuf
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+    branches:
+      - master 
+
+jobs:
+  generate-proto:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write 
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} 
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22' 
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc-gen-go and protoc-gen-go-grpc
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          echo "$(go env GOBIN)" >> $GITHUB_PATH
+
+      - name: Check for .proto file changes
+        id: check_proto_changes
+        run: |
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'protobank/proto/**/*.proto')
+          
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "Proto files changed: $CHANGED_FILES"
+            echo "proto_files_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No .proto files changed in the 'protobank/proto/' directory for this PR."
+            echo "proto_files_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Go Protobuf if .proto files changed
+        if: steps.check_proto_changes.outputs.proto_files_changed == 'true'
+        run: |
+          mkdir -p protobank/pb
+          
+          find protobank/proto/ -name "*.proto" -print0 | while IFS= read -r -d $'\0' proto_file; do
+            echo "Generating for $proto_file..."
+            protoc --proto_path=protobank/proto \
+                   --go_out=./protobank/pb --go_opt=paths=source_relative \
+                   --go-grpc_out=./protobank/pb --go-grpc_opt=paths=source_relative \
+                   "$proto_file"
+          done
+          echo "Protobuf generation complete."
+
+      - name: Commit and push changes
+        if: steps.check_proto_changes.outputs.proto_files_changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add ./protobank/pb
+          
+          git diff --staged --quiet || git commit -m "chore(proto): auto-generate protobuf files"
+          
+          git push
